@@ -1,0 +1,19 @@
+# Build directories
+build/
+out/
+bin/
+lib/
+
+# CMake generated files
+CMakeFiles/
+CMakeCache.txt
+DartConfiguration.tcl
+install_manifest.txt
+CPackConfig.cmake
+CPackSourceConfig.cmake
+
+# IDE files
+.vscode/
+.idea/
+*.vcxproj*
+*.sln
