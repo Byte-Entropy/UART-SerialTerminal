@@ -5,11 +5,32 @@
 
 #include "serial_terminal.h"
 #include <iostream>
+#include <fstream>
 #include <vector>
 #include <sstream>
 #include <thread>
 #include <regex>
 #include <conio.h>
+
+bool DEBUG_MODE = false;
+
+Config load_config() {
+    Config cfg;
+    std::ifstream file("config.txt");
+    if (file.is_open()) {
+        file >> cfg.default_port >> cfg.default_baud;
+        file.close();
+    }
+    return cfg;
+}
+
+void save_config(const Config& config) {
+    std::ofstream file("config.txt");
+    if (file.is_open()) {
+        file << config.default_port << "\n" << config.default_baud << "\n";
+        file.close();
+    }
+}
 
 void clear_input_buffer() {
     std::cin.clear();
@@ -51,7 +72,7 @@ void read_worker(serial::Serial* my_serial, std::atomic<bool>& running, std::ato
                     std::cout << colorize_telemetry(rx_data) << std::flush;
                 }
             } catch (...) {
-                // Handle dsiconnects or unplug gracefully
+                // Handle disconnects or unplug gracefully
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -118,41 +139,63 @@ std::string readline_with_completion(const std::set<std::string>& command_list, 
             if (local_echo) std::cout << ch << std::flush;
         }
     }
-
     return buffer;
 }
 
 std::string selectPort() {
+    Config cfg = load_config();
     std::vector<serial::PortInfo> ports = serial::list_ports();
-
+    
     std::cout << "Available COM Ports:\n";
-    std::cout << "[0] MOCK_SOAR_BOARD (Virtual Hardware Simulator)\n";
-
-    for (size_t i = 0; i < ports.size(); ++i) {
-        std::cout << "[" << i + 1 << "] " << ports[i].port 
-                  << " - " << ports[i].description << "\n";
+    if (DEBUG_MODE) {
+        std::cout << "[0] MOCK_SOAR_BOARD (Virtual Hardware Simulator)\n";
     }
 
-    std::cout << "\nSelect port index [0]: ";
+    int default_idx = -1;
+    for (size_t i = 0; i < ports.size(); ++i) {
+        std::cout << "[" << i + 1 << "] " << ports[i].port 
+                  << " - " << ports[i].description;
+        if (ports[i].port == cfg.default_port) {
+            std::cout << " (default)";
+            default_idx = static_cast<int>(i) + 1;
+        }
+        std::cout << "\n";
+    }
+
+    if (cfg.default_port == "MOCK_SOAR_BOARD" && DEBUG_MODE) {
+        default_idx = 0;
+    }
+
+    if (default_idx != -1) {
+        std::cout << "\nSelect port index [" << default_idx << "]: ";
+    } else {
+        std::cout << "\nSelect port index: ";
+    }
+
     std::string input;
     std::getline(std::cin, input);
 
-    size_t choice = 0;
-    if (!input.empty()) {
-        std::stringstream ss(input);
-        if (!(ss >> choice) || choice > ports.size()) {
-            std::cerr << "Invalid selection.\n";
-            return "";
-        }
+    if (input.empty() && default_idx != -1) {
+        if (default_idx == 0) return "MOCK_SOAR_BOARD";
+        return ports[default_idx - 1].port;
     }
 
-    if (choice == 0) return "MOCK_SOAR_BOARD";
+    size_t choice = 0;
+    std::stringstream ss(input);
+    if (!(ss >> choice) || (choice == 0 && !DEBUG_MODE) || choice > ports.size()) {
+        std::cerr << "Invalid selection.\n";
+        return "";
+    }
 
+    if (choice == 0 && DEBUG_MODE) return "MOCK_SOAR_BOARD";
     return ports[choice - 1].port;
 }
 
 int selectBaudRate() {
-    std::cout << "\nSelect baud rate (default [5] 115200):\n";
+    Config cfg = load_config();
+    int default_baud = cfg.default_baud > 0 ? cfg.default_baud : 115200;
+
+    std::cout << "\nSelect baud rate (default [" << default_baud << "]):\n";
     std::cout << "[1] 9600   [2] 19200   [3] 38400\n";
     std::cout << "[4] 57600  [5] 115200  [6] Custom\n";
     std::cout << "Enter choice: ";
@@ -160,11 +203,13 @@ int selectBaudRate() {
     std::string input;
     std::getline(std::cin, input);
 
-    int choice = 5;
-    if (!input.empty()) {
-        std::stringstream ss(input);
-        if (!(ss >> choice) || choice < 1 || choice > 6) return -1;
+    if (input.empty()) {
+        return default_baud;
     }
+
+    int choice = 5;
+    std::stringstream ss(input);
+    if (!(ss >> choice) || choice < 1 || choice > 6) return -1;
 
     switch (choice) {
         case 1: return 9600;
@@ -179,13 +224,13 @@ int selectBaudRate() {
             clear_input_buffer();
             return rate;
         }
-        default: return 115200;
+        default: return default_baud;
     }
 }
 
 void print_help_menu() {
     std::cout << "\n================ Terminal Controls ================\n";
-    std::cout << "  :p, :pause       - Pause port (release handle for MCU flashing)\n";
+    std::cout << "  :p, :pause       - Pause port\n";
     std::cout << "  :r, :resume      - Resume port connection\n";
     std::cout << "  :e, :echo        - Toggle local echo (on/off)\n";
     std::cout << "  :c, :cls, :clear - Clear screen\n";
@@ -282,22 +327,20 @@ void run_terminal_session(serial::Serial& my_serial, const std::string& port_nam
     std::cout << "\033[2J\033[1;1H" << std::flush;
     std::cout << "=============================================\n";
     std::cout << " SO\033[1;31mA\033[0mR Terminal Connected: " << port_name << "\n";
-
     std::cout << " Type ':h' for terminal control options.\n";
     std::cout << " Press [TAB] to auto-complete target commands.\n";
     std::cout << "=============================================\n\n";
 
     std::atomic<bool> running{true};
     std::atomic<bool> is_paused{false};
+
     std::thread rx_thread(read_worker, &my_serial, std::ref(running), std::ref(is_paused));
 
     std::set<std::string> soar_commands = {"status", "sysinfo", "sysreset"};
     bool local_echo = true;
 
     // --- Silent Auto-Discovery Setup ---
-    // Mute worker output during initial silent probe
     std::atomic<bool> silent_discovery{true};
-
     my_serial.write("h\r\n");
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
@@ -305,7 +348,7 @@ void run_terminal_session(serial::Serial& my_serial, const std::string& port_nam
         std::string discovery_rx = my_serial.read(my_serial.available());
         scrape_soar_commands(discovery_rx, soar_commands);
     }
-    silent_discovery = false; // Re-enable normal logging
+    silent_discovery = false;
 
     std::string input;
     while (true) {
@@ -348,6 +391,9 @@ void run_terminal_session(serial::Serial& my_serial, const std::string& port_nam
                     std::cerr << "\033[1;31mFailed to re-open port: " << e.what() << "\033[0m\n";
                 }
             }
+            else {
+                std::cout << "\033[33mPort is already active. No action taken.\033[0m\n";
+            }
             continue;
         }
 
@@ -362,14 +408,12 @@ void run_terminal_session(serial::Serial& my_serial, const std::string& port_nam
         input += "\r\n";
         my_serial.write(input);
 
-        // If the user typed 'h', capture the response asynchronously to expand autocompletion
         if (trigger_rescrape) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             if (my_serial.available()) {
                 std::string rx_h_response = my_serial.read(my_serial.available());
-                // Print colorized response
                 std::cout << colorize_telemetry(rx_h_response) << std::flush;
-                // Dynamically update autocompletion set
+
                 size_t prev_count = soar_commands.size();
                 scrape_soar_commands(rx_h_response, soar_commands);
                 if (soar_commands.size() > prev_count) {

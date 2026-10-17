@@ -11,6 +11,28 @@
 #include <set>
 #include <serial/serial.h>
 
+extern bool DEBUG_MODE;
+
+
+/**
+ * @brief Configuration struct for storing default COM port and baud rate settings.
+ */
+struct Config {
+    std::string default_port = "";
+    int default_baud = 115200;
+};
+
+
+/**
+ * @brief loads Config from a local file
+ */
+Config load_config(); 
+
+/**
+ * @brief Saves Config to a local file
+ */
+void save_config(const Config& config);
+
 /**
  * @brief Flushes remaining characters from std::cin stream buffer.
  */
