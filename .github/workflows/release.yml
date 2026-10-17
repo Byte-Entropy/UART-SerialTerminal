@@ -15,20 +15,17 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Setup CMake and Ninja
-        uses: jvm205/setup-cmake-ninja@v1
-
       - name: Configure CMake
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build
 
       - name: Build
         run: cmake --build build --config Release
 
-      - name: Prepare Bundle Folder
+      - name: Prepare Bundle
+        shell: powershell
         run: |
-          mkdir release_bundle
-          copy build\Release\UART_SerialTerminal.exe release_bundle\
-          # Copy any required DLLs or config files if needed
+          New-Item -ItemType Directory -Path release_bundle -Force
+          Copy-Item build\Release\*.exe release_bundle\
           Compress-Archive -Path release_bundle\* -DestinationPath UART_SerialTerminal_Windows.zip
 
       - name: Create GitHub Release
