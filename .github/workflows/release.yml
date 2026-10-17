@@ -1,0 +1,39 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup CMake and Ninja
+        uses: jvm205/setup-cmake-ninja@v1
+
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Prepare Bundle Folder
+        run: |
+          mkdir release_bundle
+          copy build\Release\UART_SerialTerminal.exe release_bundle\
+          # Copy any required DLLs or config files if needed
+          Compress-Archive -Path release_bundle\* -DestinationPath UART_SerialTerminal_Windows.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: UART_SerialTerminal_Windows.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
