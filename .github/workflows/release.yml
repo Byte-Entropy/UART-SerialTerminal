@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -29,7 +32,7 @@ jobs:
           Compress-Archive -Path release_bundle\* -DestinationPath UART_SerialTerminal_Windows.zip
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: UART_SerialTerminal_Windows.zip
         env:
