@@ -17,3 +17,6 @@ CPackSourceConfig.cmake
 .idea/
 *.vcxproj*
 *.sln
+
+# Local Config
+config.txt

@@ -9,10 +9,10 @@
 #include <string>
 #include <atomic>
 #include <set>
+#include <vector>
 #include <serial/serial.h>
 
 extern bool DEBUG_MODE;
-
 
 /**
  * @brief Configuration struct for storing default COM port and baud rate settings.
@@ -49,7 +49,10 @@ std::string colorize_telemetry(const std::string& line);
 /**
  * @brief Background thread function that continuously reads incoming UART data.
  */
-void read_worker(serial::Serial* my_serial, std::atomic<bool>& running, std::atomic<bool>& is_paused);
+void read_worker(serial::Serial* my_serial,
+                 std::atomic<bool>& running,
+                 std::atomic<bool>& is_paused,
+                 std::atomic<bool>& silent_discovery);
 
 /**
  * @brief Parses raw output from SOAR 'h' command response to extract command names.
@@ -63,7 +66,9 @@ void scrape_soar_commands(const std::string& rx_buffer, std::set<std::string>& c
  * @param local_echo Flag indicating whether typed input should be echoed to console.
  * @return std::string Completed input line.
  */
-std::string readline_with_completion(const std::set<std::string>& command_list, bool local_echo);
+std::string readline_with_completion(const std::set<std::string>& command_list,
+                                     std::vector<std::string>& history,
+                                     bool local_echo);
 
 /**
  * @brief Lists available COM ports on host system (includes MOCK option).

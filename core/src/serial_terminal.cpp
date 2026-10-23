@@ -10,9 +10,10 @@
 #include <sstream>
 #include <thread>
 #include <regex>
+#include <cctype>
 #include <conio.h>
 
-bool DEBUG_MODE = false;
+bool DEBUG_MODE = true;  // Set to true to enable MOCK_BOARD for testing without hardware.
 
 Config load_config() {
     Config cfg;
@@ -63,9 +64,12 @@ std::string colorize_telemetry(const std::string& line) {
     return formatted;
 }
 
-void read_worker(serial::Serial* my_serial, std::atomic<bool>& running, std::atomic<bool>& is_paused) {
+void read_worker(serial::Serial* my_serial,
+                 std::atomic<bool>& running,
+                 std::atomic<bool>& is_paused,
+                 std::atomic<bool>& silent_discovery) {
     while (running) {
-        if (!is_paused && my_serial->isOpen()) {
+        if (!is_paused && !silent_discovery && my_serial->isOpen()) {
             try {
                 if (my_serial->available()) {
                     std::string rx_data = my_serial->read(my_serial->available());
@@ -80,22 +84,144 @@ void read_worker(serial::Serial* my_serial, std::atomic<bool>& running, std::ato
 }
 
 void scrape_soar_commands(const std::string& rx_buffer, std::set<std::string>& command_list) {
-    std::regex cmd_regex(R"(^\s*([a-zA-Z0-9_-]+)\s*(?:-|:|>|\t|\s{2,}))", std::regex::multiline);
-    auto words_begin = std::sregex_iterator(rx_buffer.begin(), rx_buffer.end(), cmd_regex);
-    auto words_end = std::sregex_iterator();
+    std::regex print_regex(R"regex(SOAR_PRINT\(\s*"([^"]*)"\s*\))regex");
+    auto print_begin = std::sregex_iterator(rx_buffer.begin(), rx_buffer.end(), print_regex);
+    auto print_end = std::sregex_iterator();
 
-    for (std::sregex_iterator i = words_begin; i != words_end; ++i) {
-        std::smatch match = *i;
-        std::string cmd = match[1].str();
-        if (cmd != "h" && cmd != "help" && cmd.length() > 1) {
-            command_list.insert(cmd);
+    auto learn_commands = [&command_list](const std::string& printed_text) {
+        std::istringstream lines(printed_text);
+        std::string line;
+
+        while (std::getline(lines, line)) {
+            const size_t separator = line.find('-');
+            if (separator != std::string::npos) {
+                line.erase(separator);
+            }
+
+            const size_t first = line.find_first_not_of(" \t\r\n");
+            const size_t last = line.find_last_not_of(" \t\r\n");
+            if (first == std::string::npos || last < first) {
+                continue;
+            }
+
+            std::string command = line.substr(first, last - first + 1);
+            if (command.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") !=
+                std::string::npos) {
+                continue;
+            }
+
+            if (command_list.insert(command).second) {
+#if 1
+                std::cout << "\033[36m[SYSTEM] Learned command: " << command << "\033[0m\n";
+#endif
+            }
         }
+    };
+
+    bool found_print_literal = false;
+    for (std::sregex_iterator i = print_begin; i != print_end; ++i) {
+        found_print_literal = true;
+        std::string printed_text = (*i)[1].str();
+        printed_text = std::regex_replace(printed_text, std::regex(R"(\\n)"), "\n");
+        printed_text = std::regex_replace(printed_text, std::regex(R"(\\r)"), "\r");
+        learn_commands(printed_text);
+    }
+
+    // Board responses contain the rendered text rather than the SOAR_PRINT
+    // source, so also accept the same command lines directly.
+    if (!found_print_literal) {
+        learn_commands(rx_buffer);
     }
 }
 
-std::string readline_with_completion(const std::set<std::string>& command_list, bool local_echo) {
+std::string readline_with_completion(const std::set<std::string>& command_list,
+                                     std::vector<std::string>& history,
+                                     bool local_echo) {
     std::string buffer;
-    char ch;
+    std::string draft;
+    std::string suggestion_prefix;
+    size_t history_index = history.size();
+    size_t suggestion_index = 0;
+    size_t cursor = 0;
+    int ch;
+
+    auto redraw = [&]() {
+        if (!local_echo) return;
+        std::cout << "\r\033[K" << buffer
+                  << "\r\033[" << cursor << "C" << std::flush;
+    };
+
+    auto handle_navigation = [&](int key) {
+        if (key == 72 || key == 'A' || key == 'H') { // Up.
+            if (history.empty()) return;
+            if (history_index == history.size()) {
+                draft = buffer;
+            }
+            if (history_index > 0) {
+                --history_index;
+                suggestion_prefix.clear();
+                buffer = history[history_index];
+                cursor = buffer.length();
+                redraw();
+            }
+        } else if (key == 80 || key == 'B') { // Down: suggestions.
+            if (suggestion_prefix.empty()) {
+                suggestion_prefix = buffer;
+                suggestion_index = 0;
+            }
+            std::vector<std::string> matches;
+            for (const auto& command : command_list) {
+                if (command.rfind(suggestion_prefix, 0) == 0) {
+                    matches.push_back(command);
+                }
+            }
+            if (!matches.empty()) {
+                buffer = matches[suggestion_index++ % matches.size()];
+                cursor = buffer.length();
+                redraw();
+            }
+        } else if (key == 75 || key == 'D') { // Left.
+            if (cursor > 0) {
+                --cursor;
+                redraw(); 
+            }
+        } else if (key == 77 || key == 'C') { // Right.
+            if (cursor < buffer.length()) {
+                ++cursor;
+                redraw();
+            }
+        } else if (key == 83) { // Delete (Next character)
+            if (cursor < buffer.length()) {
+                buffer.erase(cursor, 1);
+                suggestion_prefix.clear();
+                redraw();
+            }
+        } else if (key == 115) { // Ctrl + Left (Previous word)
+            if (cursor > 0) {
+                // Skip preceding spaces, then word characters
+                while (cursor > 0 && buffer[cursor - 1] == ' ') --cursor;
+                while (cursor > 0 && buffer[cursor - 1] != ' ') --cursor;
+                redraw();
+            }
+        } else if (key == 116) { // Ctrl + Right (Next word)
+            if (cursor < buffer.length()) {
+                // Skip current word characters, then trailing spaces
+                while (cursor < buffer.length() && buffer[cursor] != ' ') ++cursor;
+                while (cursor < buffer.length() && buffer[cursor] == ' ') ++cursor;
+                redraw();
+            }
+        } else if (key == 147) { // Ctrl + Delete (Next word)
+            if (cursor < buffer.length()) {
+                size_t end = cursor;
+                // Skip current word characters, then trailing spaces
+                while (end < buffer.length() && buffer[end] != ' ') ++end;
+                while (end < buffer.length() && buffer[end] == ' ') ++end;
+                buffer.erase(cursor, end - cursor);
+                suggestion_prefix.clear();
+                redraw();
+            }
+        }
+    };
 
     while (true) {
         ch = _getch();
@@ -103,13 +229,33 @@ std::string readline_with_completion(const std::set<std::string>& command_list, 
         // Enter key
         if (ch == '\r' || ch == '\n') {
             if (local_echo) std::cout << "\n";
+            if (!buffer.empty()) {
+                history.push_back(buffer);
+            }
             break;
         }
         // Backspace
         else if (ch == '\b') {
-            if (!buffer.empty()) {
-                buffer.pop_back();
-                if (local_echo) std::cout << "\b \b" << std::flush;
+            if (cursor > 0) {
+                buffer.erase(cursor - 1, 1);
+                --cursor;
+                suggestion_prefix.clear();
+                redraw();
+            }
+        }
+        // Extended keys (arrow keys on Windows [ugh, windows]).
+        else if (ch == 0 || ch == 224) {
+            handle_navigation(_getch());
+        }
+        // ANSI escape sequences
+        else if (ch == 27) {
+            const int sequence_start = _getch();
+            if (sequence_start == '[' || sequence_start == 'O') {
+                int key = _getch();
+                while ((key >= '0' && key <= '9') || key == ';') {
+                    key = _getch();
+                }
+                handle_navigation(key);
             }
         }
         // Tab key (Auto-complete)
@@ -127,16 +273,47 @@ std::string readline_with_completion(const std::set<std::string>& command_list, 
                 std::string completion = matches[0].substr(buffer.length());
                 if (local_echo) std::cout << completion << std::flush;
                 buffer = matches[0];
+                cursor = buffer.length();
             } else if (matches.size() > 1) {
                 std::cout << "\n\033[36m";
                 for (const auto& m : matches) std::cout << m << "  ";
-                std::cout << "\033[0m\n> " << (local_echo ? buffer : "") << std::flush;
+                std::cout << "\033[0m\n" << (local_echo ? buffer : "") << std::flush;
             }
         }
         // Normal Printable Character
         else if (isprint(static_cast<unsigned char>(ch))) {
-            buffer += ch;
-            if (local_echo) std::cout << ch << std::flush;
+            buffer.insert(cursor, 1, static_cast<char>(ch));
+            ++cursor;
+            history_index = history.size();
+            suggestion_prefix.clear();
+            redraw();
+        }
+        // Backspace
+        else if (ch == '\b') {
+            if (cursor > 0) {
+                buffer.erase(cursor - 1, 1);
+                --cursor;
+                suggestion_prefix.clear();
+                redraw();
+            }
+        }
+        // Ctrl + Backspace (127) for deleting a word backward
+        else if (ch == 127) {
+            if (cursor > 0) {
+                size_t start = cursor;
+                // Skip over any immediate preceding spaces
+                while (start > 0 && buffer[start - 1] == ' ') {
+                    --start;
+                }
+                // Skip over the word characters until the next space
+                while (start > 0 && buffer[start - 1] != ' ') {
+                    --start;
+                }
+                buffer.erase(start, cursor - start);
+                cursor = start;
+                suggestion_prefix.clear();
+                redraw();
+            }
         }
     }
     return buffer;
@@ -148,7 +325,7 @@ std::string selectPort() {
     
     std::cout << "Available COM Ports:\n";
     if (DEBUG_MODE) {
-        std::cout << "[0] MOCK_SOAR_BOARD (Virtual Hardware Simulator)\n";
+        std::cout << "[0] MOCK_BOARD (Virtual Simulator)\n";
     }
 
     int default_idx = -1;
@@ -162,7 +339,7 @@ std::string selectPort() {
         std::cout << "\n";
     }
 
-    if (cfg.default_port == "MOCK_SOAR_BOARD" && DEBUG_MODE) {
+    if (cfg.default_port == "MOCK_BOARD" && DEBUG_MODE) {
         default_idx = 0;
     }
 
@@ -176,18 +353,26 @@ std::string selectPort() {
     std::getline(std::cin, input);
 
     if (input.empty() && default_idx != -1) {
-        if (default_idx == 0) return "MOCK_SOAR_BOARD";
+        if (default_idx == 0) return "MOCK_BOARD";
         return ports[default_idx - 1].port;
     }
 
     size_t choice = 0;
-    std::stringstream ss(input);
-    if (!(ss >> choice) || (choice == 0 && !DEBUG_MODE) || choice > ports.size()) {
-        std::cerr << "Invalid selection.\n";
-        return "";
+
+    while (true) {
+        std::stringstream ss(input);
+        if ((ss >> choice) && ((choice == 0 && DEBUG_MODE) || (choice > 0 && choice <= ports.size()))) {
+            break;
+        }
+        std::cerr << "Invalid selection. Please try again: ";
+        std::getline(std::cin, input);
+        if (input.empty() && default_idx != -1) {
+            if (default_idx == 0) return "MOCK_BOARD";
+            return ports[default_idx - 1].port;
+        }
     }
 
-    if (choice == 0 && DEBUG_MODE) return "MOCK_SOAR_BOARD";
+    if (choice == 0 && DEBUG_MODE) return "MOCK_BOARD";
     return ports[choice - 1].port;
 }
 
@@ -208,8 +393,18 @@ int selectBaudRate() {
     }
 
     int choice = 5;
-    std::stringstream ss(input);
-    if (!(ss >> choice) || choice < 1 || choice > 6) return -1;
+
+    while (true) {
+        std::stringstream ss(input);
+        if ((ss >> choice) && choice >= 1 && choice <= 6) {
+            break;
+        }
+        std::cout << "Invalid choice. Enter a number between 1 and 6: ";
+        std::getline(std::cin, input);
+        if (input.empty()) {
+            return default_baud;
+        }
+    }
 
     switch (choice) {
         case 1: return 9600;
@@ -218,11 +413,18 @@ int selectBaudRate() {
         case 4: return 57600;
         case 5: return 115200;
         case 6: {
-            std::cout << "Custom baud rate: ";
             int rate = 0;
-            if (!(std::cin >> rate) || rate <= 0) return -1;
-            clear_input_buffer();
-            return rate;
+            std::string custom_input;
+            while (true) {
+                std::cout << "Custom baud rate: ";
+                std::getline(std::cin, custom_input);
+                std::stringstream ss_custom(custom_input);
+                
+                if ((ss_custom >> rate) && rate > 0) {
+                    return rate;
+                }
+                std::cerr << "Invalid baud rate.\n";
+            }
         }
         default: return default_baud;
     }
@@ -242,12 +444,13 @@ void print_help_menu() {
 void run_mock_terminal_session() {
     std::cout << "\033[2J\033[1;1H" << std::flush;
     std::cout << "=============================================\n";
-    std::cout << "SO\033[1;31mA\033[0mR Terminal Connected: MOCK_SOAR_BOARD\n";
+    std::cout << "SO\033[1;31mA\033[0mR Terminal Connected: MOCK_BOARD\n";
     std::cout << " Running in virtual simulation mode.\n";
     std::cout << "=============================================\n\n";
 
     // Standard SOAR command set (removed 'help')
     std::set<std::string> soar_commands = {"status", "sysinfo", "sysreset"};
+    std::vector<std::string> history;
     bool local_echo = true;
 
     // Silent background auto-discovery
@@ -275,7 +478,7 @@ void run_mock_terminal_session() {
 
     std::string input;
     while (true) {
-        input = readline_with_completion(soar_commands, local_echo);
+        input = readline_with_completion(soar_commands, history, local_echo);
 
         if (input == ":q" || input == ":quit") break;
 
@@ -334,13 +537,18 @@ void run_terminal_session(serial::Serial& my_serial, const std::string& port_nam
     std::atomic<bool> running{true};
     std::atomic<bool> is_paused{false};
 
-    std::thread rx_thread(read_worker, &my_serial, std::ref(running), std::ref(is_paused));
+    std::atomic<bool> silent_discovery{true};
+    std::thread rx_thread(read_worker,
+                          &my_serial,
+                          std::ref(running),
+                          std::ref(is_paused),
+                          std::ref(silent_discovery));
 
     std::set<std::string> soar_commands = {"status", "sysinfo", "sysreset"};
+    std::vector<std::string> history;
     bool local_echo = true;
 
     // --- Silent Auto-Discovery Setup ---
-    std::atomic<bool> silent_discovery{true};
     my_serial.write("h\r\n");
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
@@ -352,7 +560,7 @@ void run_terminal_session(serial::Serial& my_serial, const std::string& port_nam
 
     std::string input;
     while (true) {
-        input = readline_with_completion(soar_commands, local_echo);
+        input = readline_with_completion(soar_commands, history, local_echo);
 
         if (input == ":q" || input == ":quit") break;
 
@@ -405,6 +613,9 @@ void run_terminal_session(serial::Serial& my_serial, const std::string& port_nam
         // --- Dynamic Re-Scraping on User 'h' Command ---
         bool trigger_rescrape = (input == "h");
 
+        if (trigger_rescrape) {
+            silent_discovery = true;
+        }
         input += "\r\n";
         my_serial.write(input);
 
@@ -421,6 +632,7 @@ void run_terminal_session(serial::Serial& my_serial, const std::string& port_nam
                               << " new commands for Tab completion!\033[0m\n";
                 }
             }
+            silent_discovery = false;
         }
     }
 
