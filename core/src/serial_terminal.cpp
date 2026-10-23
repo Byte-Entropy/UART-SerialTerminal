@@ -13,7 +13,7 @@
 #include <cctype>
 #include <conio.h>
 
-bool DEBUG_MODE = true;  // Set to true to enable MOCK_BOARD for testing without hardware.
+bool DEBUG_MODE = false;  // Set to true to enable MOCK_BOARD for testing without hardware.
 
 Config load_config() {
     Config cfg;
