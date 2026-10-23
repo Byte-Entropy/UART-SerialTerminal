@@ -147,8 +147,15 @@ std::string readline_with_completion(const std::set<std::string>& command_list,
 
     auto redraw = [&]() {
         if (!local_echo) return;
-        std::cout << "\r\033[K" << buffer
-                  << "\r\033[" << cursor << "C" << std::flush;
+        // \033[?25l hides the cursor to prevent flickering
+        std::cout << "\033[?25l\r\033[K" << buffer << "\r";
+        
+        if (cursor > 0) {
+            std::cout << "\033[" << cursor << "C";
+        }
+        
+        // \033[?25h restores the cursor
+        std::cout << "\033[?25h" << std::flush;
     };
 
     auto handle_navigation = [&](int key) {
@@ -286,7 +293,14 @@ std::string readline_with_completion(const std::set<std::string>& command_list,
             ++cursor;
             history_index = history.size();
             suggestion_prefix.clear();
-            redraw();
+            
+            // If appending to the very end, just echo the character. 
+            // This prevents multi-line text wrapping from cascading.
+            if (cursor == buffer.length()) {
+                if (local_echo) std::cout << static_cast<char>(ch) << std::flush;
+            } else {
+                redraw();
+            }
         }
         // Backspace
         else if (ch == '\b') {

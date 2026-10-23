@@ -92,6 +92,7 @@ int main(int argc, char* argv[]) {
     my_serial.setPort(port_name);
     my_serial.setBaudrate(baudrate);
     serial::Timeout timeout = serial::Timeout::simpleTimeout(1000);
+    timeout.write_timeout_constant = 10; // Reduce write blocking from 1000ms to 10ms
     my_serial.setTimeout(timeout);
 
     try {
